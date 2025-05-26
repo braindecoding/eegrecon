@@ -129,15 +129,65 @@ class GPUManager:
         """
         import gc
 
-        # Python garbage collection
-        gc.collect()
+        # Python garbage collection (multiple passes)
+        for _ in range(3):
+            gc.collect()
 
         # PyTorch cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            # Reset memory stats
+            torch.cuda.reset_peak_memory_stats()
 
         print("🧹 Aggressive memory cleanup completed")
+
+    def emergency_memory_cleanup(self):
+        """
+        Emergency memory cleanup untuk extreme cases
+        """
+        import gc
+        import sys
+
+        print("🚨 Emergency memory cleanup initiated...")
+
+        # Force garbage collection multiple times
+        for i in range(5):
+            collected = gc.collect()
+            print(f"   GC pass {i+1}: collected {collected} objects")
+
+        # Clear PyTorch caches
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_accumulated_memory_stats()
+
+        # Force Python to release memory back to OS
+        if hasattr(sys, 'intern'):
+            sys.intern.clear()
+
+        print("🧹 Emergency cleanup completed")
+
+    def get_memory_efficient_batch_size(self, data_shape, target_memory_gb=1):
+        """
+        Calculate memory-efficient batch size
+        """
+        # Estimate memory per sample
+        single_sample_size = 1
+        for dim in data_shape[1:]:  # Skip batch dimension
+            single_sample_size *= dim
+
+        # Assume float32 (4 bytes per element)
+        single_sample_gb = (single_sample_size * 4) / 1e9
+
+        # Calculate batch size untuk target memory
+        batch_size = max(1, int(target_memory_gb / single_sample_gb))
+
+        # Cap at reasonable maximum
+        batch_size = min(batch_size, 128)
+
+        return batch_size
 
     def to_device_safe(self, tensor_or_model, force_cpu_if_needed=True):
         """
@@ -310,10 +360,10 @@ class GPUManager:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-# Global GPU manager instance dengan memory limits
+# Global GPU manager instance dengan memory limits yang lebih agresif
 gpu_manager = GPUManager(
-    max_cpu_memory_gb=6,  # Limit CPU memory to 6GB (adjust based on your system)
-    max_gpu_memory_fraction=0.8  # Use 80% of GPU memory
+    max_cpu_memory_gb=16,  # Increase limit untuk handle existing usage
+    max_gpu_memory_fraction=0.9  # Use 90% of GPU memory
 )
 
 # ============================
@@ -1060,6 +1110,97 @@ class MemoryEfficientDataLoader:
         )
 
         return dataloader, optimal_batch_size
+
+class StreamingDataProcessor:
+    """
+    Streaming data processor untuk handle large datasets dengan minimal memory
+    """
+    def __init__(self, chunk_size_gb=0.5):
+        self.chunk_size_gb = chunk_size_gb
+        self.device = gpu_manager.device
+
+    def process_data_in_chunks(self, eeg_data, labels, processing_func, **kwargs):
+        """
+        Process data in memory-efficient chunks
+        """
+        print(f"🌊 Processing data in chunks (max {self.chunk_size_gb}GB per chunk)")
+
+        # Calculate chunk size
+        data_shape = eeg_data.shape
+        chunk_size = gpu_manager.get_memory_efficient_batch_size(data_shape, self.chunk_size_gb)
+
+        print(f"📊 Data shape: {data_shape}, Chunk size: {chunk_size}")
+
+        results = []
+        total_chunks = (len(eeg_data) + chunk_size - 1) // chunk_size
+
+        for i in range(0, len(eeg_data), chunk_size):
+            chunk_idx = i // chunk_size + 1
+            print(f"   Processing chunk {chunk_idx}/{total_chunks}")
+
+            # Get chunk
+            end_idx = min(i + chunk_size, len(eeg_data))
+            eeg_chunk = eeg_data[i:end_idx]
+            labels_chunk = labels[i:end_idx] if labels is not None else None
+
+            # Process chunk
+            try:
+                chunk_result = processing_func(eeg_chunk, labels_chunk, **kwargs)
+                results.append(chunk_result)
+            except Exception as e:
+                print(f"⚠️ Error processing chunk {chunk_idx}: {e}")
+                # Emergency cleanup
+                gpu_manager.emergency_memory_cleanup()
+                continue
+
+            # Cleanup after each chunk
+            if chunk_idx % 5 == 0:  # Every 5 chunks
+                gpu_manager.force_memory_cleanup()
+
+        print(f"✅ Processed {len(results)} chunks successfully")
+        return results
+
+    def create_streaming_dataloader(self, eeg_data, labels, target_memory_gb=0.5):
+        """
+        Create streaming dataloader untuk very large datasets
+        """
+        print(f"🌊 Creating streaming dataloader (target: {target_memory_gb}GB)")
+
+        # Calculate optimal batch size
+        batch_size = gpu_manager.get_memory_efficient_batch_size(eeg_data.shape, target_memory_gb)
+
+        print(f"📊 Streaming batch size: {batch_size}")
+
+        # Create memory-efficient dataset
+        class StreamingDataset(torch.utils.data.Dataset):
+            def __init__(self, eeg_data, labels):
+                self.eeg_data = eeg_data
+                self.labels = labels
+                self.length = len(eeg_data)
+
+            def __len__(self):
+                return self.length
+
+            def __getitem__(self, idx):
+                # Load data on-demand (keep on CPU)
+                eeg_sample = torch.FloatTensor(self.eeg_data[idx])
+                label_sample = torch.LongTensor([self.labels[idx]]) if self.labels is not None else torch.LongTensor([0])
+                return eeg_sample, label_sample.squeeze()
+
+        # Create dataset
+        dataset = StreamingDataset(eeg_data, labels)
+
+        # Create dataloader
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,  # No multiprocessing untuk memory safety
+            pin_memory=False,  # Disable pin_memory untuk large datasets
+            drop_last=True
+        )
+
+        return dataloader, batch_size
 
 # ============================
 # 2. EEG PREPROCESSING
