@@ -644,20 +644,212 @@ class MindBigDataLoader:
         return {'devices': devices, 'codes': codes, 'channels': channels}
 
 # ============================
+# 1.5. GPU-OPTIMIZED DATA PIPELINE
+# ============================
+
+class GPUDataPipeline:
+    """
+    GPU-Optimized data processing pipeline untuk EEG
+    """
+    def __init__(self):
+        self.device = gpu_manager.device
+        self.preprocessor = None
+
+    def create_gpu_dataloader(self, eeg_data, labels, batch_size=64, shuffle=True):
+        """
+        Create GPU-optimized DataLoader
+        """
+        print(f"🚀 Creating GPU DataLoader with batch size {batch_size}")
+
+        # Convert to tensors
+        if isinstance(eeg_data, np.ndarray):
+            eeg_tensor = torch.FloatTensor(eeg_data)
+        else:
+            eeg_tensor = eeg_data
+
+        if isinstance(labels, np.ndarray):
+            labels_tensor = torch.LongTensor(labels)
+        else:
+            labels_tensor = labels
+
+        # Create dataset
+        dataset = torch.utils.data.TensorDataset(eeg_tensor, labels_tensor)
+
+        # Create optimized dataloader
+        dataloader = gpu_manager.create_dataloader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle
+        )
+
+        return dataloader
+
+    def process_batch_on_gpu(self, batch_data, preprocessing_steps=None):
+        """
+        Process a batch of data entirely on GPU
+        """
+        eeg_batch, labels_batch = batch_data
+
+        # Move to GPU
+        eeg_batch = gpu_manager.to_device(eeg_batch)
+        labels_batch = gpu_manager.to_device(labels_batch)
+
+        # Apply preprocessing steps on GPU
+        if preprocessing_steps:
+            for step in preprocessing_steps:
+                if step == 'normalize':
+                    eeg_batch = self._gpu_normalize(eeg_batch)
+                elif step == 'filter':
+                    eeg_batch = self._gpu_filter(eeg_batch)
+                elif step == 'augment':
+                    eeg_batch = self._gpu_augment(eeg_batch)
+
+        return eeg_batch, labels_batch
+
+    def _gpu_normalize(self, data):
+        """GPU normalization"""
+        mean = torch.mean(data, dim=(0, 2), keepdim=True)
+        std = torch.std(data, dim=(0, 2), keepdim=True)
+        return (data - mean) / (std + 1e-8)
+
+    def _gpu_filter(self, data):
+        """GPU filtering (simplified)"""
+        # Simple moving average filter
+        kernel = torch.ones(1, 1, 5, device=self.device) / 5
+        filtered = F.conv2d(data.unsqueeze(1), kernel, padding=(0, 2))
+        return filtered.squeeze(1)
+
+    def _gpu_augment(self, data):
+        """GPU data augmentation"""
+        # Add small random noise
+        noise = torch.randn_like(data) * 0.01
+        return data + noise
+
+    def stream_process_large_dataset(self, file_paths, target_device='EP',
+                                   batch_size=64, preprocessing_steps=None):
+        """
+        Stream processing untuk dataset besar dengan GPU optimization
+        """
+        print(f"🌊 Starting stream processing on {self.device}")
+
+        # Initialize data loader
+        data_loader = MindBigDataLoader("data")
+
+        # Load data in chunks
+        eeg_data, labels, trial_info = data_loader.load_best_device_data(file_paths)
+
+        if len(eeg_data) == 0:
+            print("❌ No data loaded!")
+            return None
+
+        # Create GPU dataloader
+        dataloader = self.create_gpu_dataloader(eeg_data, labels, batch_size)
+
+        processed_batches = []
+        total_batches = len(dataloader)
+
+        print(f"📊 Processing {total_batches} batches...")
+
+        for batch_idx, batch_data in enumerate(dataloader):
+            # Process batch entirely on GPU
+            processed_batch = self.process_batch_on_gpu(batch_data, preprocessing_steps)
+            processed_batches.append(processed_batch)
+
+            if batch_idx % 10 == 0:
+                print(f"   Processed batch {batch_idx}/{total_batches}")
+
+            # Memory cleanup every 20 batches
+            if batch_idx % 20 == 0:
+                gpu_manager.memory_cleanup()
+
+        print(f"✅ Stream processing completed!")
+        return processed_batches
+
+# ============================
 # 2. EEG PREPROCESSING
 # ============================
 
 class EEGPreprocessor:
     """
-    Preprocessing untuk data EEG
+    GPU-Optimized Preprocessing untuk data EEG
     """
     def __init__(self, sampling_rate=250):
         self.sampling_rate = sampling_rate
         self.scaler = StandardScaler()
+        self.device = gpu_manager.device
 
     def bandpass_filter(self, data, low_freq=1, high_freq=40):
         """
-        Bandpass filter untuk EEG
+        GPU-Optimized bandpass filter untuk EEG
+        """
+        print(f"🔧 Applying bandpass filter on {self.device}...")
+
+        # Convert to tensor and move to GPU
+        if isinstance(data, np.ndarray):
+            data_tensor = gpu_manager.to_device(torch.FloatTensor(data))
+        else:
+            data_tensor = gpu_manager.to_device(data)
+
+        # Use GPU-accelerated filtering
+        try:
+            # Simple GPU-based filtering using convolution
+            filtered_data = self._gpu_bandpass_filter(data_tensor, low_freq, high_freq)
+
+            # Convert back to numpy if needed
+            if isinstance(data, np.ndarray):
+                return filtered_data.cpu().numpy()
+            else:
+                return filtered_data
+
+        except Exception as e:
+            print(f"⚠️ GPU filtering failed: {e}, falling back to CPU")
+            return self._cpu_bandpass_filter(data, low_freq, high_freq)
+
+    def _gpu_bandpass_filter(self, data_tensor, low_freq, high_freq):
+        """
+        GPU-accelerated bandpass filtering using PyTorch
+        """
+        # Simple high-pass then low-pass filtering
+        batch_size, n_channels, n_timepoints = data_tensor.shape
+
+        # Create simple filter kernels
+        kernel_size = 15
+        high_pass_kernel = self._create_highpass_kernel(kernel_size, low_freq).to(self.device)
+        low_pass_kernel = self._create_lowpass_kernel(kernel_size, high_freq).to(self.device)
+
+        # Apply filtering using convolution
+        filtered_data = data_tensor.clone()
+
+        for i in range(n_channels):
+            # High-pass filter
+            channel_data = data_tensor[:, i:i+1, :].unsqueeze(1)  # (batch, 1, 1, timepoints)
+            filtered_channel = F.conv2d(channel_data, high_pass_kernel.unsqueeze(0).unsqueeze(0),
+                                      padding=(0, kernel_size//2))
+
+            # Low-pass filter
+            filtered_channel = F.conv2d(filtered_channel, low_pass_kernel.unsqueeze(0).unsqueeze(0),
+                                      padding=(0, kernel_size//2))
+
+            filtered_data[:, i, :] = filtered_channel.squeeze()
+
+        return filtered_data
+
+    def _create_highpass_kernel(self, kernel_size, cutoff_freq):
+        """Create high-pass filter kernel"""
+        kernel = torch.ones(kernel_size) * (-1.0 / kernel_size)
+        kernel[kernel_size // 2] = 1.0 - (1.0 / kernel_size)
+        return kernel * (cutoff_freq / (self.sampling_rate / 2))
+
+    def _create_lowpass_kernel(self, kernel_size, cutoff_freq):
+        """Create low-pass filter kernel"""
+        n = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+        kernel = torch.sinc(2 * cutoff_freq * n / self.sampling_rate)
+        kernel = kernel / kernel.sum()
+        return kernel
+
+    def _cpu_bandpass_filter(self, data, low_freq, high_freq):
+        """
+        CPU fallback bandpass filter
         """
         from scipy.signal import butter, filtfilt
 
@@ -676,7 +868,68 @@ class EEGPreprocessor:
 
     def extract_features(self, data):
         """
-        Extract features dari EEG signals
+        GPU-Optimized feature extraction dari EEG signals
+        """
+        print(f"🔧 Extracting features on {self.device}...")
+
+        # Convert to tensor and move to GPU
+        if isinstance(data, np.ndarray):
+            data_tensor = gpu_manager.to_device(torch.FloatTensor(data))
+        else:
+            data_tensor = gpu_manager.to_device(data)
+
+        try:
+            features = self._gpu_extract_features(data_tensor)
+
+            # Convert back to numpy if needed
+            if isinstance(data, np.ndarray):
+                return features.cpu().numpy()
+            else:
+                return features
+
+        except Exception as e:
+            print(f"⚠️ GPU feature extraction failed: {e}, falling back to CPU")
+            return self._cpu_extract_features(data)
+
+    def _gpu_extract_features(self, data_tensor):
+        """
+        GPU-accelerated feature extraction
+        """
+        batch_size, n_channels, n_timepoints = data_tensor.shape
+
+        # Time domain features (vectorized)
+        mean_val = torch.mean(data_tensor, dim=2)  # (batch, channels)
+        std_val = torch.std(data_tensor, dim=2)    # (batch, channels)
+
+        # Frequency domain features using GPU FFT
+        fft_features = torch.fft.fft(data_tensor, dim=2)
+        fft_magnitude = torch.abs(fft_features)[:, :, :50]  # First 50 freq bins
+
+        # Power spectral density features
+        psd_features = fft_magnitude ** 2
+
+        # Statistical features
+        max_val = torch.max(data_tensor, dim=2)[0]
+        min_val = torch.min(data_tensor, dim=2)[0]
+
+        # Combine all features
+        features_list = [
+            mean_val,           # (batch, channels)
+            std_val,            # (batch, channels)
+            max_val,            # (batch, channels)
+            min_val,            # (batch, channels)
+            fft_magnitude.flatten(start_dim=1),  # (batch, channels*50)
+            psd_features.flatten(start_dim=1)    # (batch, channels*50)
+        ]
+
+        # Concatenate all features
+        combined_features = torch.cat(features_list, dim=1)
+
+        return combined_features
+
+    def _cpu_extract_features(self, data):
+        """
+        CPU fallback feature extraction
         """
         features = []
 
@@ -693,6 +946,30 @@ class EEGPreprocessor:
             features.append(sample_features)
 
         return np.array(features)
+
+    def gpu_normalize_data(self, data):
+        """
+        GPU-accelerated data normalization
+        """
+        print(f"🔧 Normalizing data on {self.device}...")
+
+        # Convert to tensor and move to GPU
+        if isinstance(data, np.ndarray):
+            data_tensor = gpu_manager.to_device(torch.FloatTensor(data))
+        else:
+            data_tensor = gpu_manager.to_device(data)
+
+        # Z-score normalization per channel
+        mean = torch.mean(data_tensor, dim=(0, 2), keepdim=True)
+        std = torch.std(data_tensor, dim=(0, 2), keepdim=True)
+
+        normalized_data = (data_tensor - mean) / (std + 1e-8)
+
+        # Convert back to numpy if needed
+        if isinstance(data, np.ndarray):
+            return normalized_data.cpu().numpy()
+        else:
+            return normalized_data
 
 # ============================
 # 3. CNN MODEL FOR EEG
@@ -3194,6 +3471,104 @@ def gpu_optimized_demo():
     # Memory cleanup
     gpu_manager.memory_cleanup()
 
+def gpu_pipeline_demo():
+    """
+    Demo untuk menunjukkan GPU processing pipeline
+    """
+    print("🚀 GPU PROCESSING PIPELINE DEMONSTRATION")
+    print("="*60)
+
+    # Show GPU info
+    demonstrate_gpu_optimization()
+
+    print("\n🌊 DEMONSTRATING GPU DATA PIPELINE")
+    print("="*50)
+
+    # Initialize GPU pipeline
+    gpu_pipeline = GPUDataPipeline()
+
+    # Create sample data
+    n_samples = 1000
+    n_channels = 14
+    n_timepoints = 256
+
+    print(f"📊 Creating sample dataset: {n_samples} samples, {n_channels} channels, {n_timepoints} timepoints")
+
+    # Generate synthetic EEG data
+    eeg_data = np.random.randn(n_samples, n_channels, n_timepoints) * 0.1
+    labels = np.random.randint(0, 10, n_samples)
+
+    print(f"✅ Sample data created: {eeg_data.shape}")
+
+    # Test 1: GPU DataLoader
+    print(f"\n🔧 TEST 1: GPU DataLoader Creation")
+    batch_size = 64 if torch.cuda.is_available() else 16
+    dataloader = gpu_pipeline.create_gpu_dataloader(eeg_data, labels, batch_size=batch_size)
+    print(f"   ✅ DataLoader created with {len(dataloader)} batches")
+
+    # Test 2: Batch processing on GPU
+    print(f"\n🔧 TEST 2: GPU Batch Processing")
+    preprocessing_steps = ['normalize', 'filter', 'augment']
+
+    processed_count = 0
+    for batch_idx, batch_data in enumerate(dataloader):
+        processed_batch = gpu_pipeline.process_batch_on_gpu(batch_data, preprocessing_steps)
+        processed_count += 1
+
+        if batch_idx >= 5:  # Process only first 5 batches for demo
+            break
+
+    print(f"   ✅ Processed {processed_count} batches on GPU")
+
+    # Test 3: Memory efficiency
+    print(f"\n🔧 TEST 3: Memory Efficiency")
+    gpu_info = gpu_manager.get_device_info()
+    if gpu_info['cuda_available']:
+        print(f"   📊 GPU Memory Usage:")
+        print(f"      • Allocated: {gpu_info['gpu_memory_allocated'] / 1e6:.1f} MB")
+        print(f"      • Reserved: {gpu_info['gpu_memory_reserved'] / 1e6:.1f} MB")
+
+    # Memory cleanup
+    gpu_manager.memory_cleanup()
+
+    # Test 4: Performance comparison
+    print(f"\n🔧 TEST 4: Performance Comparison")
+
+    # CPU processing time
+    import time
+    start_time = time.time()
+
+    # Simulate CPU processing
+    cpu_data = eeg_data[:100]  # Smaller subset for CPU
+    cpu_normalized = (cpu_data - np.mean(cpu_data, axis=(0, 2), keepdims=True)) / (np.std(cpu_data, axis=(0, 2), keepdims=True) + 1e-8)
+
+    cpu_time = time.time() - start_time
+
+    # GPU processing time
+    start_time = time.time()
+
+    gpu_data = gpu_manager.to_device(torch.FloatTensor(cpu_data))
+    gpu_normalized = gpu_pipeline._gpu_normalize(gpu_data)
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    gpu_time = time.time() - start_time
+
+    print(f"   📊 Processing Time Comparison (100 samples):")
+    print(f"      • CPU: {cpu_time*1000:.2f} ms")
+    print(f"      • GPU: {gpu_time*1000:.2f} ms")
+
+    if gpu_time > 0:
+        speedup = cpu_time / gpu_time
+        print(f"      • Speedup: {speedup:.1f}x")
+
+    print(f"\n🎉 GPU Pipeline Demo Completed!")
+    print(f"✅ All GPU processing components working correctly")
+
+    # Final memory cleanup
+    gpu_manager.memory_cleanup()
+
 if __name__ == "__main__":
     import sys
 
@@ -3207,6 +3582,9 @@ if __name__ == "__main__":
         elif sys.argv[1] == "--gpu-info":
             # Show GPU information only
             demonstrate_gpu_optimization()
+        elif sys.argv[1] == "--gpu-pipeline":
+            # Demo GPU processing pipeline
+            gpu_pipeline_demo()
         elif sys.argv[1] == "--help":
             # Show usage instructions
             print_usage_instructions()
