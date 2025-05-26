@@ -1727,14 +1727,15 @@ def main():
     """
     Contoh penggunaan pipeline dengan fokus pada rekonstruksi citra
     """
-    # Initialize pipeline
-    pipeline = EEGExperimentPipeline("path/to/mindbigdata")
+    # Initialize pipeline with path to data directory
+    pipeline = EEGExperimentPipeline("data")
 
-    # Specify file paths untuk MindBigData files
+    # Specify file paths untuk MindBigData files yang ada di folder data
     file_paths = [
-        "MindBigData-Imagined-Digits/MindBigData-Imagined-Digits-1.txt",
-        "MindBigData-Imagined-Digits/MindBigData-Imagined-Digits-2.txt",
-        # Add more files as needed
+        "data/EP1.01.txt",  # EPOC device data
+        "data/MW.txt",      # MindWave data
+        "data/MU.txt",      # Muse data
+        "data/IN.txt"       # Insight data
     ]
 
     print("🧠 STARTING MINDBIGDATA EEG-TO-IMAGE RECONSTRUCTION PIPELINE 🖼️")
