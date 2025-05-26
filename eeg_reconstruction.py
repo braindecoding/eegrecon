@@ -1,17 +1,13 @@
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-from torchvision.models import resnet18
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1618,6 +1614,11 @@ class ImageReconstructionPipeline:
         print("  5. Augment training data with more EEG-image pairs")
 
         return evaluation_metrics
+
+    def generate_comprehensive_report(self):
+        """
+        Generate laporan komprehensif hasil eksperimen
+        """
         print("COMPREHENSIVE EXPERIMENT RESULTS SUMMARY")
         print("="*60)
 
@@ -1720,7 +1721,50 @@ class ImageReconstructionPipeline:
         print("4. Consider ensemble methods for improved generalization")
 
 # ============================
-# 8. USAGE EXAMPLE
+# 8. DATA LOADING DEMONSTRATION
+# ============================
+
+def demonstrate_data_loading():
+    """
+    Demonstrate data loading and format understanding
+    """
+    print("="*70)
+    print("🔍 MINDBIDATA FORMAT DEMONSTRATION")
+    print("="*70)
+
+    print("\n📋 Expected MindBigData Format:")
+    print("Format: [id][event][device][channel][code][size][data] (tab-separated)")
+    print("\nExample line:")
+    print("1\t2\tEP\tAF3\t5\t256\t-1.2,0.8,-0.5,1.1,...")
+
+    print("\n🔧 Supported Devices:")
+    print("• MW (MindWave): 1 channel - FP1")
+    print("• EP (EPOC): 14 channels - AF3,F7,F3,FC5,T7,P7,O1,O2,P8,T8,FC6,F4,F8,AF4")
+    print("• MU (Muse): 4 channels - TP9,FP1,FP2,TP10")
+    print("• IN (Insight): 5 channels - AF3,AF4,T7,T8,PZ")
+
+    print("\n🎯 Digit Codes:")
+    print("• 0-9: Imagined digits")
+    print("• -1: Random/baseline signals (filtered out)")
+
+    print("\n⚡ Sampling Rates:")
+    print("• MW: 512 Hz")
+    print("• EP: 128 Hz")
+    print("• MU: 220 Hz")
+    print("• IN: 128 Hz")
+
+    print("\n📊 Data Processing Pipeline:")
+    print("1. Parse tab-separated format")
+    print("2. Group by trials (event + code + device)")
+    print("3. Create multichannel arrays")
+    print("4. Standardize to 2-second windows")
+    print("5. Apply bandpass filtering (1-40 Hz)")
+    print("6. Extract features for classification")
+
+    print("\n" + "="*70)
+
+# ============================
+# 9. USAGE EXAMPLE
 # ============================
 
 def main():
