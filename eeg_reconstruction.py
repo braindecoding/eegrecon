@@ -1319,6 +1319,83 @@ class EEGExperimentPipeline:
         self.results['deep_learning'] = model_results
         return models
 
+    def run_image_reconstruction_experiment_optimized(self, eeg_data, labels):
+        """
+        OPTIMIZED image reconstruction experiment dengan data yang sudah dimuat
+        """
+        print("🚀 Running OPTIMIZED EEG-to-Image Reconstruction Experiment...")
+        print(f"📊 Input data: {eeg_data.shape}, Labels: {len(labels)}")
+
+        # 1. Preprocess EEG data
+        print("Step 1: Preprocessing EEG data...")
+        eeg_data = self.preprocessor.bandpass_filter(eeg_data)
+
+        # Convert to tensors dan move to GPU
+        eeg_tensor = gpu_manager.to_device(torch.FloatTensor(eeg_data))
+        labels_tensor = gpu_manager.to_device(torch.LongTensor(labels))
+
+        # 2. Initialize image reconstruction pipeline
+        print("Step 2: Setting up GPU-optimized image reconstruction pipeline...")
+        reconstruction_pipeline = ImageReconstructionPipeline(model_type='generator')
+
+        # 3. Load reference images (prioritize real data)
+        print("Step 3: Loading reference images (real data priority)...")
+        digit_images = reconstruction_pipeline.load_mnist_references()
+
+        # 4. Create paired dataset
+        print("Step 4: Creating paired EEG-Image dataset...")
+        paired_eeg, paired_images = reconstruction_pipeline.create_paired_dataset(
+            eeg_tensor, labels, digit_images
+        )
+
+        print(f"✅ Created {len(paired_eeg)} paired samples")
+
+        # 5. GPU-optimized training
+        print("Step 5: GPU-optimized training...")
+        batch_size = 64 if torch.cuda.is_available() else 32
+        epochs = 100
+
+        trained_model = reconstruction_pipeline.train_generator(
+            paired_eeg, paired_images,
+            epochs=epochs,
+            lr=0.001,
+            batch_size=batch_size
+        )
+
+        # 6. Generate images from EEG
+        print("Step 6: Generating images from EEG...")
+        generated_images = reconstruction_pipeline.generate_images_from_eeg(paired_eeg)
+
+        # 7. Comprehensive evaluation
+        print("Step 7: Comprehensive evaluation...")
+        evaluation_metrics = reconstruction_pipeline.evaluate_reconstruction_quality(
+            generated_images, paired_images
+        )
+
+        # 8. Visualize results
+        print("Step 8: Visualizing results...")
+        reconstruction_pipeline.visualize_reconstruction_results(
+            paired_eeg[:20], generated_images[:20], paired_images[:20], labels[:20]
+        )
+
+        # Store results
+        self.results['image_reconstruction'] = {
+            'metrics': evaluation_metrics,
+            'n_samples': len(paired_eeg),
+            'model_type': reconstruction_pipeline.model_type,
+            'training_epochs': epochs,
+            'batch_size': batch_size,
+            'device': str(gpu_manager.device)
+        }
+
+        print(f"✅ Image reconstruction experiment completed!")
+        print(f"   📊 MSE: {evaluation_metrics['mse']:.6f}")
+        print(f"   📊 SSIM: {evaluation_metrics['ssim']:.4f}")
+        print(f"   🚀 Device: {gpu_manager.device}")
+        print(f"   ⚡ Batch size: {batch_size}")
+
+        return reconstruction_pipeline
+
     def test_eeg_fmri_integration(self, eeg_data):
         """
         Test integrasi EEG-fMRI
@@ -2191,6 +2268,55 @@ class ImageReconstructionPipeline:
         print("  5. Augment training data with more EEG-image pairs")
 
         return evaluation_metrics
+
+    def visualize_reconstruction_results(self, eeg_data, generated_images, target_images, labels, n_samples=10):
+        """
+        Visualisasi hasil rekonstruksi dengan layout yang lebih baik
+        """
+        try:
+            fig, axes = plt.subplots(3, n_samples, figsize=(20, 8))
+
+            for i in range(min(n_samples, len(generated_images))):
+                # Original MNIST
+                if len(target_images.shape) == 4:  # (batch, channels, height, width)
+                    target_img = target_images[i].squeeze()
+                else:
+                    target_img = target_images[i]
+
+                axes[0, i].imshow(target_img.detach().cpu().numpy(), cmap='gray')
+                axes[0, i].set_title(f'Target\nDigit {labels[i]}', fontsize=10)
+                axes[0, i].axis('off')
+
+                # Generated image
+                if len(generated_images.shape) == 4:
+                    gen_img = generated_images[i].squeeze()
+                else:
+                    gen_img = generated_images[i]
+
+                axes[1, i].imshow(gen_img.detach().cpu().numpy(), cmap='gray')
+                axes[1, i].set_title('Generated', fontsize=10)
+                axes[1, i].axis('off')
+
+                # EEG signal (first channel)
+                if len(eeg_data.shape) == 3:  # (batch, channels, timepoints)
+                    eeg_signal = eeg_data[i, 0, :].detach().cpu().numpy()
+                else:
+                    eeg_signal = eeg_data[i].detach().cpu().numpy()
+
+                axes[2, i].plot(eeg_signal)
+                axes[2, i].set_title('EEG Signal', fontsize=10)
+                axes[2, i].set_xlabel('Time')
+
+            plt.suptitle('EEG-to-Image Reconstruction Results', fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            print(f"⚠️ Visualization error: {e}")
+            print("📊 Showing basic statistics instead:")
+            print(f"   Generated images shape: {generated_images.shape}")
+            print(f"   Target images shape: {target_images.shape}")
+            print(f"   EEG data shape: {eeg_data.shape}")
 
     def run_image_reconstruction_experiment_optimized(self, eeg_data, labels):
         """
