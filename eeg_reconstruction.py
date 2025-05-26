@@ -481,24 +481,133 @@ class MindBigDataLoader:
 
     def load_by_device(self, file_paths, target_device='EP'):
         """
-        Load data untuk device tertentu saja
+        Load data untuk device tertentu saja - OPTIMIZED VERSION
         """
-        all_records = []
+        print(f"🎯 Loading data specifically for device: {target_device}")
 
+        # Map device to expected file
+        device_file_mapping = {
+            'EP': ['EP1.01.txt', 'EP.txt'],  # EPOC files
+            'MW': ['MW.txt'],                # MindWave files
+            'MU': ['MU.txt'],                # Muse files
+            'IN': ['IN.txt']                 # Insight files
+        }
+
+        all_records = []
+        files_loaded = 0
+
+        # Only load files that are likely to contain the target device
         for file_path in file_paths:
-            records = self.load_file(file_path)
-            # Filter by device
-            device_records = [r for r in records if r['device'] == target_device]
-            all_records.extend(device_records)
+            file_name = os.path.basename(file_path)
+
+            # Check if this file is likely to contain our target device
+            should_load = False
+            if target_device in device_file_mapping:
+                expected_files = device_file_mapping[target_device]
+                should_load = any(expected_file in file_name for expected_file in expected_files)
+            else:
+                # If device not in mapping, load all files (fallback)
+                should_load = True
+
+            if should_load:
+                print(f"📂 Loading file: {file_path} (expected to contain {target_device} data)")
+                records = self.load_file(file_path)
+
+                # Filter by device and count
+                device_records = [r for r in records if r['device'] == target_device]
+
+                if len(device_records) > 0:
+                    print(f"   ✅ Found {len(device_records)} {target_device} records")
+                    all_records.extend(device_records)
+                    files_loaded += 1
+                else:
+                    print(f"   ⚠️ No {target_device} records found in this file")
+            else:
+                print(f"⏭️ Skipping file: {file_path} (unlikely to contain {target_device} data)")
+
+        if len(all_records) == 0:
+            print(f"❌ No {target_device} data found in any files!")
+            print(f"💡 Available files: {[os.path.basename(f) for f in file_paths]}")
+            print(f"💡 Expected files for {target_device}: {device_file_mapping.get(target_device, 'Unknown')}")
+            return np.array([]), np.array([]), []
+
+        print(f"📊 Total {target_device} records loaded: {len(all_records)} from {files_loaded} files")
 
         trials = self.organize_by_trials(all_records)
         eeg_data, labels, trial_info = self.create_multichannel_data(trials)
 
-        print(f"Loaded {len(eeg_data)} trials for device {target_device}")
-        print(f"Data shape: {eeg_data.shape}")
-        print(f"Unique labels: {np.unique(labels)}")
+        print(f"✅ Successfully loaded {len(eeg_data)} trials for device {target_device}")
+        if len(eeg_data) > 0:
+            print(f"   📐 Data shape: {eeg_data.shape}")
+            print(f"   🎯 Unique labels: {np.unique(labels)}")
+            print(f"   📊 Samples per label: {[(label, np.sum(labels == label)) for label in np.unique(labels)]}")
 
         return eeg_data, labels, trial_info
+
+    def auto_detect_device(self, file_paths):
+        """
+        Auto-detect device yang tersedia berdasarkan nama file
+        """
+        print("🔍 Auto-detecting available devices from file names...")
+
+        device_file_mapping = {
+            'EP': ['EP1.01.txt', 'EP.txt'],  # EPOC files
+            'MW': ['MW.txt'],                # MindWave files
+            'MU': ['MU.txt'],                # Muse files
+            'IN': ['IN.txt']                 # Insight files
+        }
+
+        available_devices = []
+
+        for file_path in file_paths:
+            file_name = os.path.basename(file_path)
+            print(f"📁 Checking file: {file_name}")
+
+            for device, expected_files in device_file_mapping.items():
+                if any(expected_file in file_name for expected_file in expected_files):
+                    if device not in available_devices:
+                        available_devices.append(device)
+                        print(f"   ✅ Found {device} device file")
+
+        if not available_devices:
+            print("⚠️ No recognized device files found, will scan all files")
+            # Fallback: scan first file to detect devices
+            if file_paths:
+                sample_records = self.load_file(file_paths[0])
+                devices_in_data = set(r['device'] for r in sample_records[:100])  # Sample first 100 records
+                available_devices = list(devices_in_data)
+                print(f"   📊 Devices found in data: {available_devices}")
+
+        print(f"🎯 Available devices: {available_devices}")
+        return available_devices
+
+    def load_best_device_data(self, file_paths, preferred_devices=['EP', 'MU', 'MW', 'IN']):
+        """
+        Load data dari device terbaik yang tersedia
+        """
+        print("🎯 Loading data from best available device...")
+
+        available_devices = self.auto_detect_device(file_paths)
+
+        if not available_devices:
+            print("❌ No devices detected!")
+            return np.array([]), np.array([]), []
+
+        # Choose best device based on preference order
+        selected_device = None
+        for preferred in preferred_devices:
+            if preferred in available_devices:
+                selected_device = preferred
+                break
+
+        if selected_device is None:
+            selected_device = available_devices[0]  # Use first available
+
+        print(f"🏆 Selected device: {selected_device}")
+        print(f"   📋 Device info: {self.device_channels[selected_device]} channels")
+        print(f"   ⚡ Sampling rate: {self.device_hz[selected_device]} Hz")
+
+        return self.load_by_device(file_paths, selected_device)
 
     def get_data_statistics(self, records):
         """
@@ -2083,6 +2192,83 @@ class ImageReconstructionPipeline:
 
         return evaluation_metrics
 
+    def run_image_reconstruction_experiment_optimized(self, eeg_data, labels):
+        """
+        OPTIMIZED image reconstruction experiment dengan data yang sudah dimuat
+        """
+        print("🚀 Running OPTIMIZED EEG-to-Image Reconstruction Experiment...")
+        print(f"📊 Input data: {eeg_data.shape}, Labels: {len(labels)}")
+
+        # 1. Preprocess EEG data
+        print("Step 1: Preprocessing EEG data...")
+        eeg_data = self.preprocessor.bandpass_filter(eeg_data)
+
+        # Convert to tensors dan move to GPU
+        eeg_tensor = gpu_manager.to_device(torch.FloatTensor(eeg_data))
+        labels_tensor = gpu_manager.to_device(torch.LongTensor(labels))
+
+        # 2. Initialize image reconstruction pipeline
+        print("Step 2: Setting up GPU-optimized image reconstruction pipeline...")
+        reconstruction_pipeline = ImageReconstructionPipeline(model_type='generator')
+
+        # 3. Load reference images (prioritize real data)
+        print("Step 3: Loading reference images (real data priority)...")
+        digit_images = reconstruction_pipeline.load_mnist_references()
+
+        # 4. Create paired dataset
+        print("Step 4: Creating paired EEG-Image dataset...")
+        paired_eeg, paired_images = reconstruction_pipeline.create_paired_dataset(
+            eeg_tensor, labels, digit_images
+        )
+
+        print(f"✅ Created {len(paired_eeg)} paired samples")
+
+        # 5. GPU-optimized training
+        print("Step 5: GPU-optimized training...")
+        batch_size = 64 if torch.cuda.is_available() else 32
+        epochs = 100
+
+        trained_model = reconstruction_pipeline.train_generator(
+            paired_eeg, paired_images,
+            epochs=epochs,
+            lr=0.001,
+            batch_size=batch_size
+        )
+
+        # 6. Generate images from EEG
+        print("Step 6: Generating images from EEG...")
+        generated_images = reconstruction_pipeline.generate_images_from_eeg(paired_eeg)
+
+        # 7. Comprehensive evaluation
+        print("Step 7: Comprehensive evaluation...")
+        evaluation_metrics = reconstruction_pipeline.evaluate_reconstruction_quality(
+            generated_images, paired_images
+        )
+
+        # 8. Visualize results
+        print("Step 8: Visualizing results...")
+        reconstruction_pipeline.visualize_reconstruction_results(
+            paired_eeg[:20], generated_images[:20], paired_images[:20], labels[:20]
+        )
+
+        # Store results
+        self.results['image_reconstruction'] = {
+            'metrics': evaluation_metrics,
+            'n_samples': len(paired_eeg),
+            'model_type': reconstruction_pipeline.model_type,
+            'training_epochs': epochs,
+            'batch_size': batch_size,
+            'device': str(gpu_manager.device)
+        }
+
+        print(f"✅ Image reconstruction experiment completed!")
+        print(f"   📊 MSE: {evaluation_metrics['mse']:.6f}")
+        print(f"   📊 SSIM: {evaluation_metrics['ssim']:.4f}")
+        print(f"   🚀 Device: {gpu_manager.device}")
+        print(f"   ⚡ Batch size: {batch_size}")
+
+        return reconstruction_pipeline
+
     def generate_comprehensive_report(self):
         """
         Generate laporan komprehensif hasil eksperimen
@@ -2327,41 +2513,57 @@ def demonstrate_data_loading():
 
 def main():
     """
-    Contoh penggunaan pipeline dengan fokus pada rekonstruksi citra
+    OPTIMIZED pipeline dengan auto-detection dan smart device selection
     """
     # Initialize pipeline with path to data directory
     pipeline = EEGExperimentPipeline("data")
 
-    # Specify file paths untuk MindBigData files yang ada di folder data
-    file_paths = [
-        "data/EP1.01.txt",  # EPOC device data
-        "data/MW.txt",      # MindWave data
-        "data/MU.txt",      # Muse data
-        "data/IN.txt"       # Insight data
-    ]
+    # Auto-detect available files in data directory
+    import glob
+    file_paths = glob.glob("data/*.txt")
 
-    print("🧠 STARTING MINDBIGDATA EEG-TO-IMAGE RECONSTRUCTION PIPELINE 🖼️")
+    if not file_paths:
+        print("❌ No .txt files found in data/ directory!")
+        print("💡 Please ensure MindBigData files are in the data/ folder")
+        print("   Expected files: EP1.01.txt, MW.txt, MU.txt, IN.txt")
+        return
+
+    print("🧠 STARTING OPTIMIZED EEG-TO-IMAGE RECONSTRUCTION PIPELINE 🖼️")
     print("="*70)
+    print(f"📁 Found {len(file_paths)} data files:")
+    for fp in file_paths:
+        size = os.path.getsize(fp) / (1024*1024) if os.path.exists(fp) else 0
+        print(f"   📄 {os.path.basename(fp)} ({size:.1f} MB)")
 
-    # 1. Data loading and exploration
-    print("\n🔍 STEP 1: DATA EXPLORATION")
+    # 1. Smart device detection and selection
+    print("\n🎯 STEP 1: SMART DEVICE DETECTION & SELECTION")
     print("="*50)
 
-    # Load sample file to understand data
-    sample_records = pipeline.data_loader.load_file(file_paths[0])
-    stats = pipeline.data_loader.get_data_statistics(sample_records)
+    # Auto-detect and load best available device data
+    eeg_data, labels, trial_info = pipeline.data_loader.load_best_device_data(file_paths)
 
-    # 2. Multi-device validation
-    print("\n⚡ STEP 2: MULTI-DEVICE VALIDATION")
+    if len(eeg_data) == 0:
+        print("❌ No suitable EEG data found!")
+        print("💡 Trying to load any available data...")
+
+        # Fallback: try loading from any file
+        for file_path in file_paths:
+            print(f"🔄 Trying {file_path}...")
+            sample_records = pipeline.data_loader.load_file(file_path)
+            if len(sample_records) > 0:
+                stats = pipeline.data_loader.get_data_statistics(sample_records)
+                break
+        return
+
+    print(f"✅ Successfully loaded {len(eeg_data)} EEG trials")
+    print(f"   📐 Data shape: {eeg_data.shape}")
+    print(f"   🎯 Labels: {np.unique(labels)}")
+
+    # 2. **MAIN EXPERIMENT: EEG-TO-IMAGE RECONSTRUCTION**
+    print("\n🖼️ STEP 2: EEG-TO-IMAGE RECONSTRUCTION")
     print("="*50)
 
-    device_results = pipeline.run_multi_device_validation(file_paths)
-
-    # 3. **MAIN EXPERIMENT: EEG-TO-IMAGE RECONSTRUCTION**
-    print("\n🎯 STEP 3: EEG-TO-IMAGE RECONSTRUCTION")
-    print("="*50)
-
-    reconstruction_pipeline = pipeline.run_image_reconstruction_experiment(file_paths)
+    reconstruction_pipeline = pipeline.run_image_reconstruction_experiment_optimized(eeg_data, labels)
 
     # 4. Compare reconstruction methods
     print("\n🔬 STEP 4: RECONSTRUCTION METHODS COMPARISON")
