@@ -2,15 +2,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.gz
 
+mnist_data/
 # C extensions
 *.so
-
+*.png
+*.pth
 # Distribution / packaging
 .Python
 build/
 develop-eggs/
 dist/
+data/
 downloads/
 eggs/
 .eggs/

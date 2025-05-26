@@ -1,0 +1,14 @@
+# Eksplorasi EEG dan Integrasi Multimodal
+
+## Validasi EEG Multi-Subjek dan Generalisasi
+1. Lakukan eksperimen EEG pada beberapa subjek, bukan hanya single-subject, untuk menguji generalisasi dan variabilitas individual.
+2. Terapkan baseline deep learning untuk EEG decoding (misal: CNN, transformer EEG) dan bandingkan dengan SVM.
+
+## Integrasi EEG-fMRI: Fusi Data dan Transfer Learning
+1. Terapkan pipeline integrasi EEG-fMRI, misal dengan domain matching, joint embedding, atau transfer learning.
+2. Uji model generatif yang dapat mentranslasikan EEG ke fMRI (misal: Neural Transcoding Vision Transformer/NT-ViT), sehingga EEG dapat digunakan untuk menghasilkan representasi spasial tinggi ala fMRI.
+3. Lakukan evaluasi apakah integrasi ini benar-benar meningkatkan performa decoding atau rekonstruksi.
+
+## Analisis Feature Importance dan Interpretasi Neurobiologis
+
+1. Lakukan analisis feature importance secara sistematis (misal: saliency map, attention map) dan interpretasikan hasilnya dalam konteks neurobiologi visual/spasial.
