@@ -52,9 +52,19 @@ class GPUManager:
 
     def to_device(self, tensor_or_model):
         """
-        Move tensor atau model ke device yang optimal
+        Move tensor atau model ke device yang optimal dengan error handling
         """
-        return tensor_or_model.to(self.device)
+        try:
+            return tensor_or_model.to(self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e) or "initialization error" in str(e):
+                print(f"⚠️ CUDA error: {e}")
+                print("🔄 Falling back to CPU...")
+                self.device = torch.device('cpu')
+                self.mixed_precision = False
+                return tensor_or_model.to(self.device)
+            else:
+                raise e
 
     def get_device_info(self):
         """
@@ -98,23 +108,35 @@ class GPUManager:
 
     def create_dataloader(self, dataset, batch_size=32, shuffle=True, num_workers=None):
         """
-        Create optimized DataLoader untuk GPU
+        Create optimized DataLoader untuk GPU dengan CUDA error handling
         """
         if num_workers is None:
-            # Auto-detect optimal number of workers
+            # Set num_workers=0 untuk CUDA untuk avoid multiprocessing issues
             if torch.cuda.is_available():
-                num_workers = min(4, os.cpu_count())
+                num_workers = 0  # CUDA multiprocessing can cause issues
             else:
-                num_workers = 0
+                num_workers = min(2, os.cpu_count())
 
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),  # Faster GPU transfer
-            persistent_workers=num_workers > 0
-        )
+        try:
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                pin_memory=torch.cuda.is_available() and num_workers == 0,  # Only pin memory if no multiprocessing
+                persistent_workers=False  # Disable persistent workers untuk avoid CUDA issues
+            )
+        except Exception as e:
+            print(f"⚠️ DataLoader creation failed: {e}")
+            print("🔄 Falling back to simple DataLoader...")
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=0,
+                pin_memory=False,
+                persistent_workers=False
+            )
 
     def memory_cleanup(self):
         """
