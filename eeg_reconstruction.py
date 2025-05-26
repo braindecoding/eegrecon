@@ -8,12 +8,172 @@ from sklearn.metrics import accuracy_score
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import scipy.io as sio
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
 # ============================
 # 1. DATA LOADING AND PREPROCESSING
 # ============================
+
+class RealImageDataLoader:
+    """
+    Loader untuk data citra asli dari file digit69_28x28.mat
+    """
+    def __init__(self, data_path="data"):
+        self.data_path = data_path
+        self.mat_file = os.path.join(data_path, "digit69_28x28.mat")
+        self.images = None
+        self.labels = None
+
+    def load_digit_images(self):
+        """
+        Load data citra asli dari file .mat
+        """
+        if not os.path.exists(self.mat_file):
+            raise FileNotFoundError(f"File {self.mat_file} tidak ditemukan!")
+
+        print(f"🖼️ Loading real image data from: {self.mat_file}")
+
+        try:
+            # Load .mat file
+            mat_data = sio.loadmat(self.mat_file)
+
+            # Explore structure
+            print("📋 Available keys in .mat file:")
+            for key in mat_data.keys():
+                if not key.startswith('__'):
+                    print(f"  - {key}: {type(mat_data[key])}, shape: {getattr(mat_data[key], 'shape', 'N/A')}")
+
+            # Try to find image data (common variable names)
+            possible_keys = ['images', 'data', 'X', 'digits', 'digit_images', 'img']
+            image_data = None
+
+            for key in possible_keys:
+                if key in mat_data:
+                    image_data = mat_data[key]
+                    print(f"✅ Found image data in key: '{key}'")
+                    break
+
+            if image_data is None:
+                # Use the first non-metadata key
+                data_keys = [k for k in mat_data.keys() if not k.startswith('__')]
+                if data_keys:
+                    key = data_keys[0]
+                    image_data = mat_data[key]
+                    print(f"⚠️ Using first available key: '{key}'")
+                else:
+                    raise ValueError("No suitable data found in .mat file")
+
+            # Process image data
+            if image_data.ndim == 3:
+                # Shape: (n_samples, height, width)
+                self.images = image_data
+                n_samples = image_data.shape[0]
+
+                # Generate labels (assuming digits 0-9 are represented)
+                if n_samples >= 10:
+                    # Assume equal distribution of digits
+                    samples_per_digit = n_samples // 10
+                    self.labels = np.repeat(np.arange(10), samples_per_digit)[:n_samples]
+                else:
+                    # If less than 10 samples, assign sequential labels
+                    self.labels = np.arange(n_samples) % 10
+
+            elif image_data.ndim == 2:
+                # Shape: (n_features, n_samples) - need to reshape
+                if image_data.shape[0] == 784:  # 28x28 flattened
+                    n_samples = image_data.shape[1]
+                    self.images = image_data.T.reshape(n_samples, 28, 28)
+                elif image_data.shape[1] == 784:  # samples x features
+                    n_samples = image_data.shape[0]
+                    self.images = image_data.reshape(n_samples, 28, 28)
+                else:
+                    raise ValueError(f"Unexpected 2D shape: {image_data.shape}")
+
+                # Generate labels
+                samples_per_digit = n_samples // 10 if n_samples >= 10 else 1
+                self.labels = np.repeat(np.arange(10), samples_per_digit)[:n_samples]
+
+            else:
+                raise ValueError(f"Unexpected data dimensions: {image_data.ndim}")
+
+            # Normalize images to [0, 1]
+            self.images = self.images.astype(np.float32)
+            if self.images.max() > 1.0:
+                self.images = self.images / 255.0
+
+            print(f"✅ Successfully loaded {len(self.images)} images")
+            print(f"   Image shape: {self.images.shape}")
+            print(f"   Labels shape: {self.labels.shape}")
+            print(f"   Unique labels: {np.unique(self.labels)}")
+            print(f"   Image value range: [{self.images.min():.3f}, {self.images.max():.3f}]")
+
+            return self.images, self.labels
+
+        except Exception as e:
+            print(f"❌ Error loading .mat file: {e}")
+            raise
+
+    def get_images_by_digit(self, digit):
+        """
+        Get all images for a specific digit
+        """
+        if self.images is None or self.labels is None:
+            self.load_digit_images()
+
+        mask = self.labels == digit
+        return self.images[mask]
+
+    def get_sample_images(self, n_samples_per_digit=5):
+        """
+        Get sample images for each digit
+        """
+        if self.images is None or self.labels is None:
+            self.load_digit_images()
+
+        sample_images = {}
+        for digit in range(10):
+            digit_images = self.get_images_by_digit(digit)
+            if len(digit_images) > 0:
+                # Take first n_samples_per_digit images
+                n_take = min(n_samples_per_digit, len(digit_images))
+                sample_images[digit] = digit_images[:n_take]
+            else:
+                print(f"⚠️ No images found for digit {digit}")
+
+        return sample_images
+
+    def visualize_sample_images(self, n_samples=3):
+        """
+        Visualize sample images from the dataset
+        """
+        if self.images is None or self.labels is None:
+            self.load_digit_images()
+
+        unique_labels = np.unique(self.labels)
+        n_digits = len(unique_labels)
+
+        fig, axes = plt.subplots(n_digits, n_samples, figsize=(n_samples*2, n_digits*2))
+        if n_digits == 1:
+            axes = axes.reshape(1, -1)
+
+        for i, digit in enumerate(unique_labels):
+            digit_images = self.get_images_by_digit(digit)
+            for j in range(min(n_samples, len(digit_images))):
+                if n_digits > 1:
+                    ax = axes[i, j]
+                else:
+                    ax = axes[j]
+
+                ax.imshow(digit_images[j], cmap='gray')
+                ax.set_title(f'Digit {digit} - Sample {j+1}')
+                ax.axis('off')
+
+        plt.suptitle('Real Image Data Samples from digit69_28x28.mat', fontsize=16)
+        plt.tight_layout()
+        plt.show()
 
 class MindBigDataLoader:
     """
@@ -1423,26 +1583,92 @@ class ImageReconstructionPipeline:
 
     def load_mnist_references(self):
         """
-        Load reference MNIST images untuk setiap digit
+        Load reference images - prioritize real data from digit69_28x28.mat
         """
-        from torchvision import datasets, transforms
+        try:
+            # Try to load real image data first
+            print("🎯 Attempting to load REAL image data from digit69_28x28.mat...")
+            real_loader = RealImageDataLoader()
+            images, labels = real_loader.load_digit_images()
 
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+            # Convert to dictionary format
+            digit_images = {}
+            for digit in range(10):
+                digit_imgs = real_loader.get_images_by_digit(digit)
+                if len(digit_imgs) > 0:
+                    # Use first image for each digit, convert to tensor format
+                    img = digit_imgs[0]
+                    # Add channel dimension and convert to tensor
+                    digit_images[digit] = torch.FloatTensor(img).unsqueeze(0)  # Shape: (1, 28, 28)
+                else:
+                    print(f"⚠️ No real data for digit {digit}, will use fallback")
 
-        # Load MNIST dataset
-        mnist_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+            # Check if we have all digits
+            missing_digits = [d for d in range(10) if d not in digit_images]
+            if missing_digits:
+                print(f"⚠️ Missing digits in real data: {missing_digits}")
+                # Fill missing digits with synthetic data
+                for digit in missing_digits:
+                    # Create simple synthetic pattern
+                    img = self._create_synthetic_digit(digit)
+                    digit_images[digit] = torch.FloatTensor(img).unsqueeze(0)
 
-        # Get one representative image for each digit
-        digit_images = {}
-        for digit in range(10):
-            for idx, (image, label) in enumerate(mnist_dataset):
-                if label == digit and digit not in digit_images:
-                    digit_images[digit] = image
-                    break
+            print(f"✅ Successfully loaded reference images for digits: {list(digit_images.keys())}")
+            return digit_images
 
-        return digit_images
+        except Exception as e:
+            print(f"❌ Failed to load real image data: {e}")
+            print("🔄 Falling back to MNIST dataset...")
+
+            # Fallback to MNIST
+            from torchvision import datasets, transforms
+
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+            ])
+
+            # Load MNIST dataset
+            mnist_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+
+            # Get one representative image for each digit
+            digit_images = {}
+            for digit in range(10):
+                for idx, (image, label) in enumerate(mnist_dataset):
+                    if label == digit and digit not in digit_images:
+                        digit_images[digit] = image
+                        break
+
+            return digit_images
+
+    def _create_synthetic_digit(self, digit):
+        """
+        Create simple synthetic digit pattern as fallback
+        """
+        img = np.zeros((28, 28))
+
+        # Simple patterns for each digit
+        if digit == 0:
+            # Circle
+            center = (14, 14)
+            for i in range(28):
+                for j in range(28):
+                    dist = np.sqrt((i - center[0])**2 + (j - center[1])**2)
+                    if 8 <= dist <= 12:
+                        img[i, j] = 1.0
+        elif digit == 1:
+            # Vertical line
+            img[4:24, 13:15] = 1.0
+        elif digit == 2:
+            # Horizontal lines
+            img[8:10, 6:22] = 1.0
+            img[14:16, 6:22] = 1.0
+            img[20:22, 6:22] = 1.0
+        # Add more patterns as needed...
+        else:
+            # Default: filled rectangle with digit number pattern
+            img[8:20, 8:20] = 0.5
+
+        return img
 
     def create_paired_dataset(self, eeg_data, labels, digit_images):
         """
@@ -1729,15 +1955,15 @@ def demonstrate_data_loading():
     Demonstrate data loading and format understanding
     """
     print("="*70)
-    print("🔍 MINDBIDATA FORMAT DEMONSTRATION")
+    print("🔍 DATA LOADING DEMONSTRATION")
     print("="*70)
 
-    print("\n📋 Expected MindBigData Format:")
+    print("\n📋 1. MINDBIDATA EEG FORMAT:")
     print("Format: [id][event][device][channel][code][size][data] (tab-separated)")
     print("\nExample line:")
     print("1\t2\tEP\tAF3\t5\t256\t-1.2,0.8,-0.5,1.1,...")
 
-    print("\n🔧 Supported Devices:")
+    print("\n🔧 Supported EEG Devices:")
     print("• MW (MindWave): 1 channel - FP1")
     print("• EP (EPOC): 14 channels - AF3,F7,F3,FC5,T7,P7,O1,O2,P8,T8,FC6,F4,F8,AF4")
     print("• MU (Muse): 4 channels - TP9,FP1,FP2,TP10")
@@ -1753,13 +1979,34 @@ def demonstrate_data_loading():
     print("• MU: 220 Hz")
     print("• IN: 128 Hz")
 
-    print("\n📊 Data Processing Pipeline:")
-    print("1. Parse tab-separated format")
-    print("2. Group by trials (event + code + device)")
-    print("3. Create multichannel arrays")
-    print("4. Standardize to 2-second windows")
-    print("5. Apply bandpass filtering (1-40 Hz)")
-    print("6. Extract features for classification")
+    print("\n�️ 2. REAL IMAGE DATA (digit69_28x28.mat):")
+    print("• Source: Real digit images from .mat file")
+    print("• Format: 28x28 grayscale images")
+    print("• Usage: Target images for EEG-to-Image reconstruction")
+    print("• Priority: Used instead of synthetic MNIST when available")
+
+    print("\n📊 3. INTEGRATED PROCESSING PIPELINE:")
+    print("1. Load EEG data from MindBigData files")
+    print("2. Load REAL image data from digit69_28x28.mat")
+    print("3. Parse and preprocess EEG signals")
+    print("4. Create EEG-Image paired dataset")
+    print("5. Train reconstruction model with REAL target images")
+    print("6. Generate images from EEG using real data patterns")
+
+    print("\n🎯 4. REAL DATA DEMONSTRATION:")
+    try:
+        # Demonstrate real image loading
+        real_loader = RealImageDataLoader()
+        real_loader.load_digit_images()
+        print("✅ Real image data loaded successfully!")
+
+        # Show sample visualization
+        print("📊 Visualizing sample real images...")
+        real_loader.visualize_sample_images(n_samples=2)
+
+    except Exception as e:
+        print(f"⚠️ Could not load real image data: {e}")
+        print("💡 Make sure digit69_28x28.mat exists in data/ folder")
 
     print("\n" + "="*70)
 
