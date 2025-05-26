@@ -700,7 +700,7 @@ class GPUDataPipeline:
                 if step == 'normalize':
                     eeg_batch = self._gpu_normalize(eeg_batch)
                 elif step == 'filter':
-                    eeg_batch = self._gpu_filter(eeg_batch)
+                    eeg_batch = self._gpu_filter_vectorized(eeg_batch)
                 elif step == 'augment':
                     eeg_batch = self._gpu_augment(eeg_batch)
 
@@ -713,11 +713,40 @@ class GPUDataPipeline:
         return (data - mean) / (std + 1e-8)
 
     def _gpu_filter(self, data):
-        """GPU filtering (simplified)"""
-        # Simple moving average filter
-        kernel = torch.ones(1, 1, 5, device=self.device) / 5
-        filtered = F.conv2d(data.unsqueeze(1), kernel, padding=(0, 2))
-        return filtered.squeeze(1)
+        """GPU filtering (simplified) - FIXED VERSION"""
+        # Simple moving average filter using 1D convolution
+        batch_size, n_channels, n_timepoints = data.shape
+        kernel_size = 5
+
+        # Create 1D kernel: (out_channels, in_channels, kernel_size)
+        kernel = torch.ones(1, 1, kernel_size, device=self.device) / kernel_size
+
+        filtered_data = data.clone()
+
+        for i in range(n_channels):
+            # Get channel data: (batch, timepoints) -> (batch, 1, timepoints)
+            channel_data = data[:, i, :].unsqueeze(1)
+
+            # Apply 1D convolution
+            filtered_channel = F.conv1d(channel_data, kernel, padding=kernel_size//2)
+
+            # Store result: (batch, 1, timepoints) -> (batch, timepoints)
+            filtered_data[:, i, :] = filtered_channel.squeeze(1)
+
+        return filtered_data
+
+    def _gpu_filter_vectorized(self, data):
+        """OPTIMIZED: Vectorized GPU filtering untuk semua channel sekaligus"""
+        batch_size, n_channels, n_timepoints = data.shape
+        kernel_size = 5
+
+        # Create group convolution kernel: (channels, 1, kernel_size)
+        kernel = torch.ones(n_channels, 1, kernel_size, device=self.device) / kernel_size
+
+        # Apply group convolution (process all channels simultaneously)
+        filtered_data = F.conv1d(data, kernel, padding=kernel_size//2, groups=n_channels)
+
+        return filtered_data
 
     def _gpu_augment(self, data):
         """GPU data augmentation"""
@@ -792,8 +821,8 @@ class EEGPreprocessor:
 
         # Use GPU-accelerated filtering
         try:
-            # Simple GPU-based filtering using convolution
-            filtered_data = self._gpu_bandpass_filter(data_tensor, low_freq, high_freq)
+            # Use vectorized GPU filtering (faster)
+            filtered_data = self._gpu_bandpass_filter_vectorized(data_tensor, low_freq, high_freq)
 
             # Convert back to numpy if needed
             if isinstance(data, np.ndarray):
@@ -807,9 +836,8 @@ class EEGPreprocessor:
 
     def _gpu_bandpass_filter(self, data_tensor, low_freq, high_freq):
         """
-        GPU-accelerated bandpass filtering using PyTorch
+        GPU-accelerated bandpass filtering using PyTorch - FIXED VERSION
         """
-        # Simple high-pass then low-pass filtering
         batch_size, n_channels, n_timepoints = data_tensor.shape
 
         # Create simple filter kernels
@@ -817,20 +845,54 @@ class EEGPreprocessor:
         high_pass_kernel = self._create_highpass_kernel(kernel_size, low_freq).to(self.device)
         low_pass_kernel = self._create_lowpass_kernel(kernel_size, high_freq).to(self.device)
 
-        # Apply filtering using convolution
+        # Apply filtering using 1D convolution (correct approach)
         filtered_data = data_tensor.clone()
 
+        # Reshape kernels for 1D convolution: (out_channels, in_channels, kernel_size)
+        high_pass_kernel_1d = high_pass_kernel.unsqueeze(0).unsqueeze(0)  # (1, 1, kernel_size)
+        low_pass_kernel_1d = low_pass_kernel.unsqueeze(0).unsqueeze(0)    # (1, 1, kernel_size)
+
         for i in range(n_channels):
-            # High-pass filter
-            channel_data = data_tensor[:, i:i+1, :].unsqueeze(1)  # (batch, 1, 1, timepoints)
-            filtered_channel = F.conv2d(channel_data, high_pass_kernel.unsqueeze(0).unsqueeze(0),
-                                      padding=(0, kernel_size//2))
+            # Get channel data: (batch, timepoints) -> (batch, 1, timepoints)
+            channel_data = data_tensor[:, i, :].unsqueeze(1)
 
-            # Low-pass filter
-            filtered_channel = F.conv2d(filtered_channel, low_pass_kernel.unsqueeze(0).unsqueeze(0),
-                                      padding=(0, kernel_size//2))
+            # Apply high-pass filter using 1D convolution
+            filtered_channel = F.conv1d(channel_data, high_pass_kernel_1d,
+                                      padding=kernel_size//2)
 
-            filtered_data[:, i, :] = filtered_channel.squeeze()
+            # Apply low-pass filter
+            filtered_channel = F.conv1d(filtered_channel, low_pass_kernel_1d,
+                                      padding=kernel_size//2)
+
+            # Store result: (batch, 1, timepoints) -> (batch, timepoints)
+            filtered_data[:, i, :] = filtered_channel.squeeze(1)
+
+        return filtered_data
+
+    def _gpu_bandpass_filter_vectorized(self, data_tensor, low_freq, high_freq):
+        """
+        OPTIMIZED: Vectorized GPU bandpass filtering untuk semua channel sekaligus
+        """
+        batch_size, n_channels, n_timepoints = data_tensor.shape
+
+        # Create filter kernels
+        kernel_size = 15
+        high_pass_kernel = self._create_highpass_kernel(kernel_size, low_freq).to(self.device)
+        low_pass_kernel = self._create_lowpass_kernel(kernel_size, high_freq).to(self.device)
+
+        # Reshape data untuk group convolution: (batch, channels, timepoints)
+        # Reshape kernels untuk group convolution: (channels, 1, kernel_size)
+        high_pass_kernel_group = high_pass_kernel.unsqueeze(0).repeat(n_channels, 1).unsqueeze(1)
+        low_pass_kernel_group = low_pass_kernel.unsqueeze(0).repeat(n_channels, 1).unsqueeze(1)
+
+        # Apply group convolution (process all channels simultaneously)
+        # High-pass filter
+        filtered_data = F.conv1d(data_tensor, high_pass_kernel_group,
+                               padding=kernel_size//2, groups=n_channels)
+
+        # Low-pass filter
+        filtered_data = F.conv1d(filtered_data, low_pass_kernel_group,
+                               padding=kernel_size//2, groups=n_channels)
 
         return filtered_data
 
