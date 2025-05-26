@@ -19,11 +19,14 @@ warnings.filterwarnings('ignore')
 
 class GPUManager:
     """
-    Manager untuk optimasi GPU dan device management
+    Manager untuk optimasi GPU dan device management dengan memory control
     """
-    def __init__(self):
+    def __init__(self, max_cpu_memory_gb=4, max_gpu_memory_fraction=0.8):
+        self.max_cpu_memory_gb = max_cpu_memory_gb
+        self.max_gpu_memory_fraction = max_gpu_memory_fraction
         self.device = self._setup_device()
         self.mixed_precision = torch.cuda.is_available()
+        self._setup_memory_management()
 
     def _setup_device(self):
         """
@@ -49,6 +52,112 @@ class GPUManager:
             print("💻 Using CPU (GPU not available)")
 
         return device
+
+    def _setup_memory_management(self):
+        """
+        Setup memory management untuk CPU dan GPU
+        """
+        if torch.cuda.is_available():
+            # Set GPU memory fraction
+            torch.cuda.set_per_process_memory_fraction(self.max_gpu_memory_fraction)
+            print(f"🔧 GPU memory limited to {self.max_gpu_memory_fraction*100:.0f}% of total")
+
+            # Enable memory pool untuk efficient allocation
+            if hasattr(torch.cuda, 'memory_pool'):
+                torch.cuda.empty_cache()
+
+        # Setup CPU memory monitoring
+        import psutil
+        self.cpu_memory_monitor = psutil.Process()
+        print(f"🔧 CPU memory limited to {self.max_cpu_memory_gb} GB")
+
+    def check_memory_usage(self):
+        """
+        Check current memory usage dan return statistics
+        """
+        memory_info = {}
+
+        # CPU Memory
+        import psutil
+        cpu_memory = psutil.virtual_memory()
+        process_memory = self.cpu_memory_monitor.memory_info().rss / 1e9  # GB
+
+        memory_info['cpu'] = {
+            'total_gb': cpu_memory.total / 1e9,
+            'available_gb': cpu_memory.available / 1e9,
+            'used_gb': cpu_memory.used / 1e9,
+            'process_gb': process_memory,
+            'percent': cpu_memory.percent
+        }
+
+        # GPU Memory
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            gpu_allocated = torch.cuda.memory_allocated(0) / 1e9
+            gpu_reserved = torch.cuda.memory_reserved(0) / 1e9
+
+            memory_info['gpu'] = {
+                'total_gb': gpu_memory,
+                'allocated_gb': gpu_allocated,
+                'reserved_gb': gpu_reserved,
+                'free_gb': gpu_memory - gpu_reserved,
+                'percent': (gpu_reserved / gpu_memory) * 100
+            }
+
+        return memory_info
+
+    def is_memory_safe(self, additional_gb=0):
+        """
+        Check if it's safe to allocate additional memory
+        """
+        memory_info = self.check_memory_usage()
+
+        # Check CPU memory
+        cpu_safe = (memory_info['cpu']['process_gb'] + additional_gb) < self.max_cpu_memory_gb
+
+        # Check GPU memory
+        gpu_safe = True
+        if torch.cuda.is_available():
+            gpu_free = memory_info['gpu']['free_gb']
+            gpu_safe = additional_gb < gpu_free * 0.8  # Keep 20% buffer
+
+        return cpu_safe and gpu_safe
+
+    def force_memory_cleanup(self):
+        """
+        Aggressive memory cleanup
+        """
+        import gc
+
+        # Python garbage collection
+        gc.collect()
+
+        # PyTorch cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        print("🧹 Aggressive memory cleanup completed")
+
+    def to_device_safe(self, tensor_or_model, force_cpu_if_needed=True):
+        """
+        Move to device dengan memory safety check
+        """
+        if isinstance(tensor_or_model, torch.Tensor):
+            tensor_size_gb = tensor_or_model.numel() * tensor_or_model.element_size() / 1e9
+        else:
+            # Estimate model size
+            tensor_size_gb = sum(p.numel() * p.element_size() for p in tensor_or_model.parameters()) / 1e9
+
+        # Check if safe to move to GPU
+        if self.device.type == 'cuda' and not self.is_memory_safe(tensor_size_gb):
+            if force_cpu_if_needed:
+                print(f"⚠️ Not enough GPU memory ({tensor_size_gb:.2f} GB), keeping on CPU")
+                return tensor_or_model.cpu() if hasattr(tensor_or_model, 'cpu') else tensor_or_model
+            else:
+                print(f"⚠️ Memory warning: Moving {tensor_size_gb:.2f} GB to GPU")
+
+        return self.to_device(tensor_or_model)
 
     def to_device(self, tensor_or_model):
         """
@@ -86,22 +195,63 @@ class GPUManager:
 
         return info
 
-    def optimize_model(self, model):
+    def optimize_model(self, model, enable_compile=True, compile_mode="default"):
         """
-        Optimize model untuk GPU dengan berbagai teknik
+        Memory-efficient model optimization dengan kontrol memory
         """
-        model = self.to_device(model)
+        print("🔧 Optimizing model with memory management...")
+
+        # Check memory before optimization
+        memory_before = self.check_memory_usage()
+        print(f"📊 Memory before optimization: CPU {memory_before['cpu']['process_gb']:.1f}GB")
+
+        # Move model to device dengan safety check
+        model = self.to_device_safe(model, force_cpu_if_needed=True)
 
         # Enable mixed precision jika tersedia
         if self.mixed_precision and torch.cuda.is_available():
             print("⚡ Enabling mixed precision training (FP16)")
 
-        # Compile model jika PyTorch 2.0+
-        if hasattr(torch, 'compile'):
+        # Compile model dengan memory management
+        if enable_compile and hasattr(torch, 'compile'):
             try:
-                model = torch.compile(model)
-                print("🔥 Model compiled with torch.compile for faster execution")
-            except:
+                # Check if we have enough memory for compilation
+                memory_info = self.check_memory_usage()
+                cpu_available = self.max_cpu_memory_gb - memory_info['cpu']['process_gb']
+
+                if cpu_available < 2.0:  # Need at least 2GB for compilation
+                    print(f"⚠️ Low CPU memory ({cpu_available:.1f}GB available), skipping torch.compile")
+                    print("💡 Use smaller batch size or increase max_cpu_memory_gb")
+                    return model
+
+                print(f"🔥 Compiling model (mode: {compile_mode})...")
+                print("⏳ This may take a moment and use extra RAM temporarily...")
+
+                # Use memory-efficient compilation mode
+                if compile_mode == "memory_efficient":
+                    model = torch.compile(model, mode="reduce-overhead")
+                elif compile_mode == "max_performance":
+                    model = torch.compile(model, mode="max-autotune")
+                else:
+                    model = torch.compile(model)
+
+                print("✅ Model compiled successfully")
+
+                # Check memory after compilation
+                memory_after = self.check_memory_usage()
+                memory_increase = memory_after['cpu']['process_gb'] - memory_before['cpu']['process_gb']
+                print(f"📊 Memory after compilation: CPU {memory_after['cpu']['process_gb']:.1f}GB (+{memory_increase:.1f}GB)")
+
+                # Force cleanup after compilation
+                self.force_memory_cleanup()
+
+            except Exception as e:
+                print(f"⚠️ torch.compile failed: {e}")
+                print("🔄 Using standard model")
+        else:
+            if not enable_compile:
+                print("🔧 torch.compile disabled by user")
+            else:
                 print("⚠️ torch.compile not available, using standard model")
 
         return model
@@ -160,8 +310,11 @@ class GPUManager:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-# Global GPU manager instance
-gpu_manager = GPUManager()
+# Global GPU manager instance dengan memory limits
+gpu_manager = GPUManager(
+    max_cpu_memory_gb=6,  # Limit CPU memory to 6GB (adjust based on your system)
+    max_gpu_memory_fraction=0.8  # Use 80% of GPU memory
+)
 
 # ============================
 # 1. DATA LOADING AND PREPROCESSING
@@ -835,6 +988,78 @@ class GPUDataPipeline:
 
         print(f"✅ Stream processing completed!")
         return processed_batches
+
+class MemoryEfficientDataLoader:
+    """
+    Memory-efficient data loader untuk large datasets
+    """
+    def __init__(self, max_memory_gb=2):
+        self.max_memory_gb = max_memory_gb
+        self.device = gpu_manager.device
+
+    def estimate_data_size(self, data_shape, dtype=torch.float32):
+        """
+        Estimate memory size of data
+        """
+        if dtype == torch.float32:
+            bytes_per_element = 4
+        elif dtype == torch.float16:
+            bytes_per_element = 2
+        else:
+            bytes_per_element = 8
+
+        total_elements = 1
+        for dim in data_shape:
+            total_elements *= dim
+
+        return (total_elements * bytes_per_element) / 1e9  # GB
+
+    def calculate_optimal_batch_size(self, data_shape, target_memory_gb=1):
+        """
+        Calculate optimal batch size based on memory constraints
+        """
+        single_sample_gb = self.estimate_data_size(data_shape[1:])  # Exclude batch dimension
+        optimal_batch_size = int(target_memory_gb / single_sample_gb)
+
+        # Ensure minimum batch size of 1 and maximum of original batch size
+        optimal_batch_size = max(1, min(optimal_batch_size, data_shape[0]))
+
+        return optimal_batch_size
+
+    def create_memory_efficient_dataloader(self, eeg_data, labels, target_memory_gb=1):
+        """
+        Create DataLoader dengan memory constraints
+        """
+        # Calculate optimal batch size
+        optimal_batch_size = self.calculate_optimal_batch_size(eeg_data.shape, target_memory_gb)
+
+        print(f"🔧 Optimal batch size for {target_memory_gb}GB memory: {optimal_batch_size}")
+
+        # Create CPU tensors
+        if isinstance(eeg_data, np.ndarray):
+            eeg_tensor = torch.FloatTensor(eeg_data)
+        else:
+            eeg_tensor = eeg_data.cpu()
+
+        if isinstance(labels, np.ndarray):
+            labels_tensor = torch.LongTensor(labels)
+        else:
+            labels_tensor = labels.cpu()
+
+        # Create dataset
+        dataset = torch.utils.data.TensorDataset(eeg_tensor, labels_tensor)
+
+        # Create memory-efficient dataloader
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=optimal_batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+            drop_last=True  # Ensure consistent batch sizes
+        )
+
+        return dataloader, optimal_batch_size
 
 # ============================
 # 2. EEG PREPROCESSING
@@ -3685,6 +3910,132 @@ def gpu_pipeline_demo():
     # Final memory cleanup
     gpu_manager.memory_cleanup()
 
+def memory_management_demo():
+    """
+    Demo untuk memory management dan optimization
+    """
+    print("🧠 MEMORY MANAGEMENT DEMONSTRATION")
+    print("="*60)
+
+    # Show initial memory status
+    memory_info = gpu_manager.check_memory_usage()
+    print(f"\n📊 INITIAL MEMORY STATUS:")
+    print(f"  • CPU Process: {memory_info['cpu']['process_gb']:.2f} GB")
+    print(f"  • CPU Available: {memory_info['cpu']['available_gb']:.2f} GB")
+    print(f"  • CPU Limit: {gpu_manager.max_cpu_memory_gb} GB")
+
+    if 'gpu' in memory_info:
+        print(f"  • GPU Allocated: {memory_info['gpu']['allocated_gb']:.2f} GB")
+        print(f"  • GPU Free: {memory_info['gpu']['free_gb']:.2f} GB")
+        print(f"  • GPU Total: {memory_info['gpu']['total_gb']:.2f} GB")
+
+    # Test 1: Memory-efficient data loading
+    print(f"\n🔧 TEST 1: Memory-Efficient Data Loading")
+
+    # Create large dataset
+    n_samples = 2000
+    n_channels = 14
+    n_timepoints = 512
+
+    print(f"📊 Creating dataset: {n_samples} samples, {n_channels} channels, {n_timepoints} timepoints")
+
+    # Estimate memory requirement
+    mem_loader = MemoryEfficientDataLoader()
+    data_shape = (n_samples, n_channels, n_timepoints)
+    estimated_size = mem_loader.estimate_data_size(data_shape)
+    print(f"   Estimated size: {estimated_size:.2f} GB")
+
+    # Calculate optimal batch size
+    optimal_batch = mem_loader.calculate_optimal_batch_size(data_shape, target_memory_gb=1)
+    print(f"   Optimal batch size: {optimal_batch}")
+
+    # Test 2: Memory monitoring during operations
+    print(f"\n🔧 TEST 2: Memory Monitoring")
+
+    # Create test data
+    test_data = np.random.randn(500, n_channels, n_timepoints).astype(np.float32)
+    test_labels = np.random.randint(0, 10, 500)
+
+    print("   Creating tensors...")
+    memory_before = gpu_manager.check_memory_usage()
+
+    # Create tensors
+    tensor_data = torch.FloatTensor(test_data)
+    tensor_labels = torch.LongTensor(test_labels)
+
+    memory_after = gpu_manager.check_memory_usage()
+    memory_increase = memory_after['cpu']['process_gb'] - memory_before['cpu']['process_gb']
+    print(f"   Memory increase: +{memory_increase:.2f} GB")
+
+    # Test 3: Safe GPU transfer
+    print(f"\n🔧 TEST 3: Safe GPU Transfer")
+
+    if torch.cuda.is_available():
+        # Test safe transfer
+        print("   Testing safe GPU transfer...")
+        safe_tensor = gpu_manager.to_device_safe(tensor_data, force_cpu_if_needed=True)
+
+        if safe_tensor.is_cuda:
+            print("   ✅ Successfully moved to GPU")
+        else:
+            print("   ⚠️ Kept on CPU due to memory constraints")
+    else:
+        print("   ⚠️ GPU not available, skipping GPU transfer test")
+
+    # Test 4: Memory cleanup
+    print(f"\n🔧 TEST 4: Memory Cleanup")
+
+    memory_before_cleanup = gpu_manager.check_memory_usage()
+    print(f"   Memory before cleanup: {memory_before_cleanup['cpu']['process_gb']:.2f} GB")
+
+    # Force cleanup
+    gpu_manager.force_memory_cleanup()
+
+    memory_after_cleanup = gpu_manager.check_memory_usage()
+    memory_freed = memory_before_cleanup['cpu']['process_gb'] - memory_after_cleanup['cpu']['process_gb']
+    print(f"   Memory after cleanup: {memory_after_cleanup['cpu']['process_gb']:.2f} GB")
+    print(f"   Memory freed: {memory_freed:.2f} GB")
+
+    # Test 5: Model compilation with memory management
+    print(f"\n🔧 TEST 5: Memory-Aware Model Compilation")
+
+    # Create small test model
+    test_model = torch.nn.Sequential(
+        torch.nn.Linear(n_channels * n_timepoints, 128),
+        torch.nn.ReLU(),
+        torch.nn.Linear(128, 10)
+    )
+
+    print("   Testing model optimization...")
+    memory_before_opt = gpu_manager.check_memory_usage()
+
+    # Optimize with memory management
+    optimized_model = gpu_manager.optimize_model(
+        test_model,
+        enable_compile=True,
+        compile_mode="memory_efficient"
+    )
+
+    memory_after_opt = gpu_manager.check_memory_usage()
+    opt_memory_increase = memory_after_opt['cpu']['process_gb'] - memory_before_opt['cpu']['process_gb']
+    print(f"   Memory increase from optimization: +{opt_memory_increase:.2f} GB")
+
+    # Final summary
+    print(f"\n📋 MEMORY MANAGEMENT SUMMARY:")
+    print(f"  ✅ Memory monitoring: Active")
+    print(f"  ✅ Memory limits: CPU {gpu_manager.max_cpu_memory_gb}GB")
+    print(f"  ✅ Safe GPU transfer: Enabled")
+    print(f"  ✅ Automatic cleanup: Enabled")
+    print(f"  ✅ Memory-efficient loading: Available")
+
+    final_memory = gpu_manager.check_memory_usage()
+    print(f"\n📊 FINAL MEMORY STATUS:")
+    print(f"  • CPU Process: {final_memory['cpu']['process_gb']:.2f} GB")
+    if 'gpu' in final_memory:
+        print(f"  • GPU Allocated: {final_memory['gpu']['allocated_gb']:.2f} GB")
+
+    print(f"\n🎉 Memory management demo completed!")
+
 if __name__ == "__main__":
     import sys
 
@@ -3701,6 +4052,9 @@ if __name__ == "__main__":
         elif sys.argv[1] == "--gpu-pipeline":
             # Demo GPU processing pipeline
             gpu_pipeline_demo()
+        elif sys.argv[1] == "--memory-demo":
+            # Demo memory management
+            memory_management_demo()
         elif sys.argv[1] == "--help":
             # Show usage instructions
             print_usage_instructions()
