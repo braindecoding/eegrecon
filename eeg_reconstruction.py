@@ -117,13 +117,27 @@ class GPUManager:
             else:
                 num_workers = min(2, os.cpu_count())
 
+        # Check if dataset contains GPU tensors (can't use pin_memory)
+        pin_memory_safe = False
+        if torch.cuda.is_available() and num_workers == 0:
+            try:
+                # Check first sample to see if it's on GPU
+                sample = dataset[0]
+                if isinstance(sample, (tuple, list)):
+                    # Check if any tensor in sample is on GPU
+                    pin_memory_safe = all(not (hasattr(t, 'is_cuda') and t.is_cuda) for t in sample if torch.is_tensor(t))
+                else:
+                    pin_memory_safe = not (hasattr(sample, 'is_cuda') and sample.is_cuda)
+            except:
+                pin_memory_safe = False
+
         try:
             return torch.utils.data.DataLoader(
                 dataset,
                 batch_size=batch_size,
                 shuffle=shuffle,
                 num_workers=num_workers,
-                pin_memory=torch.cuda.is_available() and num_workers == 0,  # Only pin memory if no multiprocessing
+                pin_memory=pin_memory_safe,  # Only pin memory if tensors are on CPU
                 persistent_workers=False  # Disable persistent workers untuk avoid CUDA issues
             )
         except Exception as e:
@@ -679,20 +693,26 @@ class GPUDataPipeline:
 
     def create_gpu_dataloader(self, eeg_data, labels, batch_size=64, shuffle=True):
         """
-        Create GPU-optimized DataLoader
+        Create GPU-optimized DataLoader - FIXED VERSION
         """
         print(f"🚀 Creating GPU DataLoader with batch size {batch_size}")
 
-        # Convert to tensors
+        # Convert to CPU tensors first (important for pin_memory)
         if isinstance(eeg_data, np.ndarray):
             eeg_tensor = torch.FloatTensor(eeg_data)
         else:
-            eeg_tensor = eeg_data
+            # If already a tensor, move to CPU first
+            eeg_tensor = eeg_data.cpu() if eeg_data.is_cuda else eeg_data
 
         if isinstance(labels, np.ndarray):
             labels_tensor = torch.LongTensor(labels)
         else:
-            labels_tensor = labels
+            # If already a tensor, move to CPU first
+            labels_tensor = labels.cpu() if labels.is_cuda else labels
+
+        # Ensure tensors are on CPU for DataLoader
+        eeg_tensor = eeg_tensor.cpu()
+        labels_tensor = labels_tensor.cpu()
 
         # Create dataset
         dataset = torch.utils.data.TensorDataset(eeg_tensor, labels_tensor)
@@ -2436,15 +2456,23 @@ class ImageReconstructionPipeline:
         # Learning rate scheduler
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-        # Move data to GPU
-        eeg_data = gpu_manager.to_device(eeg_data)
-        target_images = gpu_manager.to_device(target_images)
+        # Keep data on CPU for DataLoader, move to GPU in training loop
+        # Convert to CPU tensors if they're not already
+        if isinstance(eeg_data, torch.Tensor) and eeg_data.is_cuda:
+            eeg_data_cpu = eeg_data.cpu()
+        else:
+            eeg_data_cpu = eeg_data
+
+        if isinstance(target_images, torch.Tensor) and target_images.is_cuda:
+            target_images_cpu = target_images.cpu()
+        else:
+            target_images_cpu = target_images
 
         # Setup mixed precision training
         scaler = torch.cuda.amp.GradScaler() if gpu_manager.mixed_precision else None
 
-        # Create dataset dan dataloader untuk batch processing
-        dataset = torch.utils.data.TensorDataset(eeg_data, target_images)
+        # Create dataset dan dataloader untuk batch processing (CPU tensors)
+        dataset = torch.utils.data.TensorDataset(eeg_data_cpu, target_images_cpu)
         dataloader = gpu_manager.create_dataloader(dataset, batch_size=batch_size, shuffle=True)
 
         # Training loop
@@ -2458,6 +2486,10 @@ class ImageReconstructionPipeline:
             num_batches = 0
 
             for batch_eeg, batch_images in dataloader:
+                # Move batch data to GPU
+                batch_eeg = gpu_manager.to_device(batch_eeg)
+                batch_images = gpu_manager.to_device(batch_images)
+
                 optimizer.zero_grad()
 
                 # Mixed precision forward pass
@@ -2477,7 +2509,7 @@ class ImageReconstructionPipeline:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    # Standard training
+                    # Standard training (batch_eeg and batch_images already on GPU)
                     if self.model_type == 'generator':
                         generated_images = self.model(batch_eeg)
                         loss = self.criterion(generated_images, batch_images)
